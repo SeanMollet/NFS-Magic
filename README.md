@@ -35,4 +35,10 @@ root=/dev/nfs rw nfsroot=HOST:/,port=11111,mountport=11111,mountproto=tcp,v3,tcp
 
 A kernel nfsroot defaults to `rsize=4096,wsize=4096`; give `rsize=`/`wsize=` to use the 64 KiB transfers the server offers.
 
-Build: `cargo build --release` → `target/release/nfs-magic`.
+On Windows (and other non-Unix hosts) a directory `--source` or `--file` carries no Unix metadata: files are
+owned by root, modes are 0755 for directories and symlinks and 0644 for files (0444 if read-only), hard links
+are loaded as separate copies, and there are no device nodes, fifos or sockets. Squashfs images keep their full
+metadata on every host, so serve a root file system from an image there.
+
+Build: `cargo build --release` → `target/release/nfs-magic`. Prebuilt binaries for Linux, macOS and Windows
+(x86_64 and aarch64) are on the [Releases](https://github.com/SeanMollet/NFS-Magic/releases) page.
