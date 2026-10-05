@@ -3,8 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use backhand::{FilesystemReader, InnerNode};
@@ -39,8 +37,7 @@ pub fn load_file(st: &mut State, src: &Path, dest: &Path, o: &Opts) -> Res<()> {
     if !m.is_file() {
         return Err(format!("{}: not a regular file", src.display()).into());
     }
-    let t = nfstime3 { seconds: m.mtime() as u32, nseconds: m.mtime_nsec() as u32 };
-    put(st, parent, name.as_bytes(), attr(o, m.mode(), m.uid(), m.gid(), t), Kind::File(fs::read(src)?))?;
+    put(st, parent, name.as_encoded_bytes(), host_attr(o, &m), Kind::File(fs::read(src)?))?;
     Ok(())
 }
 
@@ -51,6 +48,63 @@ fn excluded(o: &Opts, rel: &Path) -> bool {
 fn attr(o: &Opts, mode: u32, uid: u32, gid: u32, mtime: nfstime3) -> Attr {
     let (uid, gid) = if o.root_squash { (0, 0) } else { (uid, gid) };
     Attr { mode: mode & 0o7777, uid, gid, atime: mtime, mtime, ctime: mtime }
+}
+
+#[cfg(unix)]
+fn host_attr(o: &Opts, m: &fs::Metadata) -> Attr {
+    use std::os::unix::fs::MetadataExt;
+    attr(o, m.mode(), m.uid(), m.gid(), nfstime3 { seconds: m.mtime() as u32, nseconds: m.mtime_nsec() as u32 })
+}
+
+/// No Unix owner or mode bits on this host: root-owned, permissions from the file type and read-only flag
+#[cfg(not(unix))]
+fn host_attr(o: &Opts, m: &fs::Metadata) -> Attr {
+    let ft = m.file_type();
+    let mode = if ft.is_dir() || ft.is_symlink() {
+        0o755
+    } else if m.permissions().readonly() {
+        0o444
+    } else {
+        0o644
+    };
+    let d = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).unwrap_or_default();
+    attr(o, mode, 0, 0, nfstime3 { seconds: d.as_secs() as u32, nseconds: d.subsec_nanos() })
+}
+
+/// Identity of a multiply-linked host file, so its other names become hard links
+#[cfg(unix)]
+fn link_key(m: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    (m.nlink() > 1).then(|| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn link_key(_: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+/// Device, fifo or socket node
+#[cfg(unix)]
+fn host_special(m: &fs::Metadata) -> Option<Kind> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let ft = m.file_type();
+    let (major, minor) = (((m.rdev() >> 8) & 0xfff) as u32, ((m.rdev() & 0xff) | ((m.rdev() >> 12) & 0xffffff00)) as u32);
+    let t = if ft.is_char_device() {
+        ftype3::NF3CHR
+    } else if ft.is_block_device() {
+        ftype3::NF3BLK
+    } else if ft.is_fifo() {
+        ftype3::NF3FIFO
+    } else {
+        ftype3::NF3SOCK
+    };
+    Some(Kind::Special(t, major, minor))
+}
+
+/// Nothing but files, directories and symlinks on this host
+#[cfg(not(unix))]
+fn host_special(_: &fs::Metadata) -> Option<Kind> {
+    None
 }
 
 fn put_dir_path(st: &mut State, dest: &Path) -> Res<fileid3> {
@@ -92,17 +146,17 @@ fn load_dir(
         }
         let p = e.path();
         let m = fs::symlink_metadata(&p)?;
-        let t = nfstime3 { seconds: m.mtime() as u32, nseconds: m.mtime_nsec() as u32 };
-        let a = attr(o, m.mode(), m.uid(), m.gid(), t);
-        let n = name.as_bytes();
+        let a = host_attr(o, &m);
+        let n = name.as_encoded_bytes();
         let ft = m.file_type();
         if ft.is_dir() {
             let sub = put_dir(st, id, n, a)?;
             load_dir(st, &p, sub, &r, o, links)?;
             continue;
         }
-        if m.nlink() > 1 {
-            if let Some(&target) = links.get(&(m.dev(), m.ino())) {
+        let key = link_key(&m);
+        if let Some(k) = key {
+            if let Some(&target) = links.get(&k) {
                 if st.nodes.contains_key(&target) {
                     st.link(id, n, target).map_err(|e| format!("{:?}", e))?;
                     continue;
@@ -112,23 +166,15 @@ fn load_dir(
         let kind = if ft.is_file() {
             Kind::File(fs::read(&p)?)
         } else if ft.is_symlink() {
-            Kind::Symlink(fs::read_link(&p)?.as_os_str().as_bytes().to_vec())
+            Kind::Symlink(fs::read_link(&p)?.as_os_str().as_encoded_bytes().to_vec())
+        } else if let Some(kind) = host_special(&m) {
+            kind
         } else {
-            let (major, minor) = (((m.rdev() >> 8) & 0xfff) as u32, ((m.rdev() & 0xff) | ((m.rdev() >> 12) & 0xffffff00)) as u32);
-            let t = if ft.is_char_device() {
-                ftype3::NF3CHR
-            } else if ft.is_block_device() {
-                ftype3::NF3BLK
-            } else if ft.is_fifo() {
-                ftype3::NF3FIFO
-            } else {
-                ftype3::NF3SOCK
-            };
-            Kind::Special(t, major, minor)
+            continue;
         };
         let new = put(st, id, n, a, kind)?;
-        if m.nlink() > 1 {
-            links.insert((m.dev(), m.ino()), new);
+        if let Some(k) = key {
+            links.insert(k, new);
         }
     }
     Ok(())
@@ -157,7 +203,7 @@ fn load_squashfs(st: &mut State, src: &Path, dest: &Path, o: &Opts) -> Res<()> {
         }
         // an excluded (or otherwise skipped) parent leaves the subtree out
         let Some(&parent) = dirs.get(full.parent().unwrap_or(Path::new(""))) else { continue };
-        let name = full.file_name().unwrap().as_bytes();
+        let name = full.file_name().unwrap().as_encoded_bytes();
         let kind = match &node.inner {
             InnerNode::Dir(_) => {
                 let id = put_dir(st, parent, name, a)?;
@@ -169,7 +215,7 @@ fn load_squashfs(st: &mut State, src: &Path, dest: &Path, o: &Opts) -> Res<()> {
                 fsr.file(f).reader().read_to_end(&mut data)?;
                 Kind::File(data)
             },
-            InnerNode::Symlink(l) => Kind::Symlink(l.link.as_os_str().as_bytes().to_vec()),
+            InnerNode::Symlink(l) => Kind::Symlink(l.link.as_os_str().as_encoded_bytes().to_vec()),
             InnerNode::CharacterDevice(d) => special(ftype3::NF3CHR, d.device_number),
             InnerNode::BlockDevice(d) => special(ftype3::NF3BLK, d.device_number),
             InnerNode::NamedPipe => Kind::Special(ftype3::NF3FIFO, 0, 0),
