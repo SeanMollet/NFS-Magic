@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -233,8 +233,15 @@ pub struct MemFs {
 }
 
 impl MemFs {
+    /// Where an inode is mirrored; None for a path that would not stay inside the write-copy directory
     fn copy_path(&self, st: &State, id: fileid3) -> Option<PathBuf> {
-        self.write_copy.as_ref().map(|base| base.join(st.rel_path(id)))
+        let base = self.write_copy.as_ref()?;
+        let rel = st.rel_path(id);
+        if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+            warn!("write-copy: not mirroring {}", rel.display());
+            return None;
+        }
+        Some(base.join(rel))
     }
 
     /// Mirror a write (or a truncation/extension when data is empty) into the write-copy directory
@@ -270,6 +277,16 @@ impl MemFs {
                 }
             }
         }
+    }
+}
+
+/// A name a client may give a new directory entry: one path component, not "." or ".."
+fn check_name(name: &[u8]) -> Result<(), nfsstat3> {
+    match name {
+        b"" => Err(nfsstat3::NFS3ERR_INVAL),
+        b"." | b".." => Err(nfsstat3::NFS3ERR_EXIST),
+        _ if name.contains(&b'/') || name.contains(&0) => Err(nfsstat3::NFS3ERR_INVAL),
+        _ => Ok(()),
     }
 }
 
@@ -404,6 +421,7 @@ impl NFSFileSystem for MemFs {
     }
 
     async fn create(&self, dirid: fileid3, filename: &filename3, attr: sattr3) -> Result<(fileid3, fattr3), nfsstat3> {
+        check_name(&filename.0)?;
         let (id, copy, size) = {
             let mut st = self.state.write().unwrap();
             // UNCHECKED create of an existing file: keep it, apply the attributes (e.g. truncation)
@@ -430,6 +448,7 @@ impl NFSFileSystem for MemFs {
     }
 
     async fn create_exclusive(&self, dirid: fileid3, filename: &filename3) -> Result<fileid3, nfsstat3> {
+        check_name(&filename.0)?;
         let (id, copy) = {
             let mut st = self.state.write().unwrap();
             if st.lookup(dirid, &filename.0).is_ok() {
@@ -443,6 +462,7 @@ impl NFSFileSystem for MemFs {
     }
 
     async fn mkdir(&self, dirid: fileid3, dirname: &filename3) -> Result<(fileid3, fattr3), nfsstat3> {
+        check_name(&dirname.0)?;
         let mut st = self.state.write().unwrap();
         if st.lookup(dirid, &dirname.0).is_ok() {
             return Err(nfsstat3::NFS3ERR_EXIST);
@@ -475,6 +495,7 @@ impl NFSFileSystem for MemFs {
         to_dirid: fileid3,
         to_filename: &filename3,
     ) -> Result<(), nfsstat3> {
+        check_name(&to_filename.0)?;
         let (from_copy, to_copy) = {
             let mut st = self.state.write().unwrap();
             let id = st.lookup(from_dirid, &from_filename.0)?;
@@ -541,6 +562,7 @@ impl NFSFileSystem for MemFs {
         symlink: &nfspath3,
         attr: &sattr3,
     ) -> Result<(fileid3, fattr3), nfsstat3> {
+        check_name(&linkname.0)?;
         let mut st = self.state.write().unwrap();
         if st.lookup(dirid, &linkname.0).is_ok() {
             return Err(nfsstat3::NFS3ERR_EXIST);
@@ -556,6 +578,41 @@ impl NFSFileSystem for MemFs {
         match &self.state.read().unwrap().nodes.get(&id).ok_or(nfsstat3::NFS3ERR_STALE)?.kind {
             Kind::Symlink(t) => Ok(t.clone().into()),
             _ => Err(nfsstat3::NFS3ERR_INVAL),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fs_with(names: &[&[u8]]) -> (MemFs, fileid3) {
+        let mut st = State::new();
+        let mut id = ROOT_ID;
+        for (i, n) in names.iter().enumerate() {
+            let kind = if i + 1 < names.len() { Kind::Dir(BTreeMap::new()) } else { Kind::File(Vec::new()) };
+            id = st.insert(id, n, new_attr(0o644), kind).unwrap();
+        }
+        (MemFs { state: RwLock::new(st), write_copy: Some(PathBuf::from("/wc")) }, id)
+    }
+
+    #[test]
+    fn client_names() {
+        for bad in [&b""[..], b".", b"..", b"a/b", b"../x", b"/etc", b"a\0b"] {
+            assert!(check_name(bad).is_err(), "{:?}", bad);
+        }
+        for good in [&b"a"[..], b"...", b".hidden", b"a b", b"a\\b"] {
+            assert!(check_name(good).is_ok(), "{:?}", good);
+        }
+    }
+
+    #[test]
+    fn copy_path_stays_inside() {
+        let (fs, id) = fs_with(&[b"var", b"log"]);
+        assert_eq!(fs.copy_path(&fs.state.read().unwrap(), id), Some(PathBuf::from("/wc/var/log")));
+        for bad in [&[&b"/etc"[..], b"passwd"][..], &[b"a", b"../../x"], &[b"a/../..", b"x"]] {
+            let (fs, id) = fs_with(bad);
+            assert_eq!(fs.copy_path(&fs.state.read().unwrap(), id), None, "{:?}", bad);
         }
     }
 }

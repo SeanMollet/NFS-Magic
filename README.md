@@ -16,6 +16,20 @@ nfs-magic -s output/images/rootfs.squashfs -s output/system=/system \
     --root-squash --write-copy /tmp/run1 --listen 0.0.0.0:11111
 ```
 
+## ⚠️ Not secure — by design
+
+NFS-Magic is a development and automation tool. It has no security of any kind: no authentication, no
+client address restrictions, no permission checks, no encryption. Anyone who can reach the port can read,
+change and delete everything it serves, and with `--write-copy` can write any files it likes into that
+host directory.
+
+- Never expose it to the internet. Run it only on a trusted, isolated network (a bench network, a VM or
+  container network, or `--listen 127.0.0.1:PORT`). The default listen address, `0.0.0.0`, accepts every
+  interface.
+- Never serve anything valuable, private or important with it: no credentials, keys, personal data or
+  production files. Assume everything you load can be read by anybody on the network.
+- Run it as an unprivileged user, and point `--write-copy` at a scratch directory.
+
 | option | |
 |---|---|
 | `-s, --source SRC[=DEST]` | squashfs image or directory loaded at DEST (default `/`); repeatable, later ones overlay earlier ones |
