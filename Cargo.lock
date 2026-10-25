@@ -87,8 +87,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "backhand"
 version = "0.25.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "deb8799e91f66c730e3ae50e8a260d63401e9479f236fb74f793d7656f143f0c"
+source = "git+https://github.com/SeanMollet/backhand?branch=node-inode-number#4968f19779dde13a39e6af5d88727bc9eb9383bb"
 dependencies = [
  "deku",
  "flate2",
@@ -102,7 +101,7 @@ dependencies = [
  "tracing",
  "xxhash-rust",
  "zstd",
- "zstd-safe",
+ "zstd-safe 8.0.0",
 ]
 
 [[package]]
@@ -524,8 +523,7 @@ dependencies = [
 [[package]]
 name = "nfsserve"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef1424b6d88c60a091931392970999ea3ceab132d968e6a5545c770fad5b97d7"
+source = "git+https://github.com/SeanMollet/nfsserve?branch=link-support#1506f181d47ba17487865929a0c786c78682e96f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1053,7 +1051,7 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 7.3.0",
 ]
 
 [[package]]
@@ -1061,6 +1059,15 @@ name = "zstd-safe"
 version = "7.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
 dependencies = [
  "zstd-sys",
 ]

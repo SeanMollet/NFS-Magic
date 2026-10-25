@@ -12,3 +12,9 @@ nfsserve = "0.11"
 tokio = { version = "1.53.2", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# Hard link support, until these are merged upstream:
+# nfsserve: NFSv3 LINK; backhand: Node::inode_number
+[patch.crates-io]
+nfsserve = { git = "https://github.com/SeanMollet/nfsserve", branch = "link-support" }
+backhand = { git = "https://github.com/SeanMollet/backhand", branch = "node-inode-number" }

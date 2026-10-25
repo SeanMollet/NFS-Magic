@@ -235,8 +235,11 @@ pub struct MemFs {
 impl MemFs {
     /// Where an inode is mirrored; None for a path that would not stay inside the write-copy directory
     fn copy_path(&self, st: &State, id: fileid3) -> Option<PathBuf> {
+        self.copy_path_rel(st.rel_path(id))
+    }
+
+    fn copy_path_rel(&self, rel: PathBuf) -> Option<PathBuf> {
         let base = self.write_copy.as_ref()?;
-        let rel = st.rel_path(id);
         if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
             warn!("write-copy: not mirroring {}", rel.display());
             return None;
@@ -263,6 +266,21 @@ impl MemFs {
         })();
         if let Err(e) = res {
             warn!("write-copy {}: {}", path.display(), e);
+        }
+    }
+
+    /// A new name for a mirrored file becomes a hard link in the write-copy too
+    fn copy_link(&self, from: Option<PathBuf>, to: Option<PathBuf>) {
+        if let (Some(from), Some(to)) = (from, to) {
+            if from.exists() {
+                if let Some(p) = to.parent() {
+                    let _ = fs::create_dir_all(p);
+                }
+                let _ = fs::remove_file(&to);
+                if let Err(e) = fs::hard_link(&from, &to) {
+                    warn!("write-copy link {} -> {}: {}", from.display(), to.display(), e);
+                }
+            }
         }
     }
 
@@ -572,6 +590,31 @@ impl NFSFileSystem for MemFs {
         let id = st.insert(dirid, &linkname.0, a, Kind::Symlink(symlink.0.clone()))?;
         let fa = st.fattr(id)?;
         Ok((id, fa))
+    }
+
+    async fn link(&self, fileid: fileid3, dirid: fileid3, linkname: &filename3) -> Result<(), nfsstat3> {
+        check_name(&linkname.0)?;
+        let (from_copy, to_copy) = {
+            let mut st = self.state.write().unwrap();
+            if matches!(st.nodes.get(&fileid).ok_or(nfsstat3::NFS3ERR_STALE)?.kind, Kind::Dir(_)) {
+                return Err(nfsstat3::NFS3ERR_PERM);
+            }
+            if st.lookup(dirid, &linkname.0).is_ok() {
+                return Err(nfsstat3::NFS3ERR_EXIST);
+            }
+            st.link(dirid, &linkname.0, fileid)?;
+            let t = now();
+            st.nodes.get_mut(&fileid).unwrap().attr.ctime = t;
+            if let Some(d) = st.nodes.get_mut(&dirid) {
+                d.attr.mtime = t;
+                d.attr.ctime = t;
+            }
+            // the inode keeps its first name for the write-copy; the new name is mirrored alongside it
+            let to_copy = self.copy_path_rel(st.rel_path(dirid).join(&*String::from_utf8_lossy(&linkname.0)));
+            (self.copy_path(&st, fileid), to_copy)
+        };
+        self.copy_link(from_copy, to_copy);
+        Ok(())
     }
 
     async fn readlink(&self, id: fileid3) -> Result<nfspath3, nfsstat3> {

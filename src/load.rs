@@ -186,6 +186,8 @@ fn load_squashfs(st: &mut State, src: &Path, dest: &Path, o: &Opts) -> Res<()> {
     let base = put_dir_path(st, dest)?;
     // directory ids by squashfs path; parents come before their children
     let mut dirs: HashMap<PathBuf, fileid3> = HashMap::from([(PathBuf::new(), base)]);
+    // ids by squashfs inode number: a later name for the same inode becomes a hard link
+    let mut links: HashMap<u32, fileid3> = HashMap::new();
     for node in fsr.files() {
         let full = node.fullpath.strip_prefix("/").unwrap_or(&node.fullpath);
         let h = &node.header;
@@ -204,6 +206,13 @@ fn load_squashfs(st: &mut State, src: &Path, dest: &Path, o: &Opts) -> Res<()> {
         // an excluded (or otherwise skipped) parent leaves the subtree out
         let Some(&parent) = dirs.get(full.parent().unwrap_or(Path::new(""))) else { continue };
         let name = full.file_name().unwrap().as_encoded_bytes();
+        let key = node.inode_number.filter(|_| !matches!(node.inner, InnerNode::Dir(_)));
+        if let Some(&target) = key.and_then(|k| links.get(&k)) {
+            if st.nodes.contains_key(&target) {
+                st.link(parent, name, target).map_err(|e| format!("{:?}", e))?;
+                continue;
+            }
+        }
         let kind = match &node.inner {
             InnerNode::Dir(_) => {
                 let id = put_dir(st, parent, name, a)?;
@@ -221,7 +230,10 @@ fn load_squashfs(st: &mut State, src: &Path, dest: &Path, o: &Opts) -> Res<()> {
             InnerNode::NamedPipe => Kind::Special(ftype3::NF3FIFO, 0, 0),
             InnerNode::Socket => Kind::Special(ftype3::NF3SOCK, 0, 0),
         };
-        put(st, parent, name, a, kind)?;
+        let new = put(st, parent, name, a, kind)?;
+        if let Some(k) = key {
+            links.insert(k, new);
+        }
     }
     Ok(())
 }
